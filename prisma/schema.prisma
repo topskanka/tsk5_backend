@@ -1,0 +1,399 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Cart {
+  id           Int        @id @default(autoincrement())
+  userId       Int        @unique
+  mobileNumber String?
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items        CartItem[]
+
+  @@map("Cart")
+}
+
+model User {
+  id               Int           @id @default(autoincrement())
+  name             String
+  email            String        @unique
+  password         String
+  role             String
+  createdAt        DateTime      @default(now())
+  phone            String?
+  loanBalance      Float         @default(0)
+  hasLoan          Boolean       @default(false)
+  adminLoanBalance Float?        @db.Float
+  isLoggedIn       Boolean       @default(false)
+  isSuspended      Boolean       @default(false)
+  refundedTotal    Float         @default(0)
+  storefrontSlug   String?       @unique @db.VarChar(100) // Unique storefront URL slug
+  cart             Cart?
+  orders           Order[]
+  TopUp            TopUp[]
+  transactions     Transaction[]
+  storefrontProducts StorefrontProduct[] @relation("AgentStorefront")
+  referralOrders     ReferralOrder[]     @relation("AgentReferrals")
+  commissionPayouts  CommissionPayout[]  @relation("AgentPayouts")
+
+  @@map("User")
+}
+
+model CartItem {
+  id           Int     @id @default(autoincrement())
+  cartId       Int
+  quantity     Int     @default(1)
+  price        Float
+  productId    Int
+  mobileNumber String?
+  cart         Cart    @relation(fields: [cartId], references: [id], onDelete: NoAction)
+  product      Product @relation(fields: [productId], references: [id], onDelete: NoAction)
+
+  @@index([cartId], map: "CartItem_cartId_fkey")
+  @@index([productId], map: "CartItem_productId_fkey")
+  @@map("CartItem")
+}
+
+model Product {
+  id              Int         @id @default(autoincrement())
+  name            String
+  description     String?
+  price           Float
+  promoPrice      Float?
+  usePromoPrice   Boolean     @default(false)
+  stock           Int         @default(0)
+  showInShop      Boolean     @default(false)
+  shopStockClosed Boolean     @default(false)
+  showForAgents   Boolean     @default(true)
+  createdAt       DateTime    @default(now())
+  CartItem        CartItem[]
+  OrderItem       OrderItem[]
+  storefrontProducts StorefrontProduct[]
+  referralOrders     ReferralOrder[]
+
+  @@index([name], map: "Product_name_idx")
+  @@index([name, description], map: "Product_name_description_idx")
+  @@map("Product")
+}
+
+model Order {
+  id           Int         @id @default(autoincrement())
+  userId       Int
+  createdAt    DateTime    @default(now())
+  status       String      @default("Pending")
+  mobileNumber String?
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items        OrderItem[]
+
+  @@index([userId], map: "Order_userId_fkey")
+  @@index([userId, createdAt])
+  @@map("Order")
+}
+
+model OrderItem {
+  id           Int       @id @default(autoincrement())
+  orderId            Int
+  productId          Int
+  quantity           Int
+  mobileNumber       String?
+  status             String    @default("Pending")
+  productName        String?
+  productPrice       Float?
+  productDescription String?
+  updatedAt          DateTime? @updatedAt
+  order        Order     @relation(fields: [orderId], references: [id], onDelete: NoAction)
+  product      Product   @relation(fields: [productId], references: [id], onDelete: NoAction)
+
+  @@index([orderId], map: "OrderItem_orderId_fkey")
+  @@index([productId], map: "OrderItem_productId_fkey")
+  @@index([status], map: "OrderItem_status_idx")
+  @@map("OrderItem")
+}
+
+model TopUp {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  referenceId String   @unique
+  amount      Float
+  status      String   @default("Pending")
+  submittedBy String
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId], map: "TopUp_userId_fkey")
+  @@map("TopUp")
+}
+
+model Upload {
+  id         Int        @id @default(autoincrement())
+  filename   String     @db.VarChar(255)
+  filePath   String?    @db.VarChar(255)
+  uploadedAt DateTime?  @db.DateTime(0)
+  userId     String?    @db.VarChar(255)
+  purchases  Purchase[]
+
+  @@map("Upload")
+}
+
+model Purchase {
+  id              Int    @id @default(autoincrement())
+  phone           String @db.VarChar(20)
+  price           String @db.VarChar(100)
+  itemDescription String @db.Text
+  uploadedFileId  Int
+  uploadedFile    Upload @relation(fields: [uploadedFileId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([uploadedFileId], map: "uploaded_file_id")
+  @@map("Purchase")
+}
+
+model Transaction {
+  id              Int       @id @default(autoincrement())
+  userId          Int
+  amount          Float
+  balance         Float
+  type            String
+  description     String    @db.Text
+  reference       String?   @db.VarChar(255)
+  createdAt       DateTime? @default(now())
+  previousBalance Float     @default(0)
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_user_transaction")
+
+  @@index([userId], map: "fk_user_transaction")
+  @@map("Transaction")
+}
+
+model Announcement {
+  id             String             @id @default(cuid())
+  title          String             @db.VarChar(500)
+  message        String             @db.Text
+  isActive       Boolean            @default(true)
+  priority       Int                @default(1)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @default(now()) @updatedAt
+  createdBy      String
+  target         String             @default("login") // login, shop, all
+  targetAudience String             @default("all") // all, shop, premium, normal, super, other, user
+  readBy         NotificationRead[]
+
+  @@map("Announcements")
+}
+
+model NotificationRead {
+  id             Int          @id @default(autoincrement())
+  announcementId String
+  userId         Int
+  readAt         DateTime     @default(now())
+  announcement   Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+
+  @@unique([announcementId, userId])
+  @@index([userId])
+  @@map("NotificationRead")
+}
+
+model Complaint {
+  id              Int       @id @default(autoincrement())
+  orderId         String?
+  mobileNumber    String    @db.VarChar(20)
+  whatsappNumber  String?   @db.VarChar(20)
+  message         String    @db.Text
+  complaintDate   DateTime?
+  complaintTime   String?   @db.VarChar(10)
+  status          String    @default("pending") // pending, reviewed, resolved
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @default(now()) @updatedAt
+  adminNotes      String?   @db.Text
+
+  @@map("Complaint")
+}
+
+model SmsMessage {
+  id          Int      @id @default(autoincrement())
+  phoneNumber String   @db.VarChar(20)
+  message     String   @db.Text
+  reference   String?  @db.VarChar(255)
+  amount      Float?
+  isProcessed Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@map("SmsMessage")
+}
+
+model PaymentTransaction {
+  id               Int      @id @default(autoincrement())
+  externalRef      String   @unique @db.VarChar(255)
+  mobileNumber     String   @db.VarChar(20)
+  amount           Float
+  currency         String   @default("GHS") @db.VarChar(10)
+  channel          String   @db.VarChar(50)
+  status           String   @db.VarChar(50)
+  productId        Int?
+  productName      String?  @db.VarChar(255)
+  orderId          Int?
+  moolreCode       String?  @db.VarChar(255)
+  moolreMessage    String?  @db.Text
+  moolreSessionId  String?  @db.VarChar(255)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @default(now()) @updatedAt
+
+  @@index([externalRef], map: "PaymentTransaction_externalRef_idx")
+  @@index([mobileNumber], map: "PaymentTransaction_mobileNumber_idx")
+  @@index([status], map: "PaymentTransaction_status_idx")
+  @@map("PaymentTransaction")
+}
+
+// Agent Storefront - Products listed by agents with custom prices
+model StorefrontProduct {
+  id            Int      @id @default(autoincrement())
+  agentId       Int
+  productId     Int
+  customPrice   Float    // Agent's selling price (includes their markup)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @default(now()) @updatedAt
+  agent         User     @relation("AgentStorefront", fields: [agentId], references: [id], onDelete: Cascade)
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, productId])
+  @@index([agentId], map: "StorefrontProduct_agentId_idx")
+  @@index([productId], map: "StorefrontProduct_productId_idx")
+  @@map("StorefrontProduct")
+}
+
+// Referral Orders - Orders placed through agent storefronts
+model ReferralOrder {
+  id              Int       @id @default(autoincrement())
+  agentId         Int
+  productId       Int
+  customerName    String    @db.VarChar(255)
+  customerPhone   String    @db.VarChar(20)
+  basePrice       Float     // Admin's original price
+  agentPrice      Float     // Price customer paid (agent's custom price)
+  commission      Float     // agentPrice - basePrice
+  paymentRef      String    @unique @db.VarChar(255)
+  paymentStatus   String    @default("Pending") @db.VarChar(50)
+  orderStatus     String    @default("Pending") @db.VarChar(50)
+  orderId         Int?      // Link to actual Order created for processing
+  commissionPaid  Boolean   @default(false)
+  commissionPaymentMethod String? @db.VarChar(20) // 'wallet' or 'momo'
+  paidAt          DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @default(now()) @updatedAt
+  agent           User      @relation("AgentReferrals", fields: [agentId], references: [id], onDelete: Cascade)
+  product         Product   @relation(fields: [productId], references: [id], onDelete: NoAction)
+
+  @@index([agentId], map: "ReferralOrder_agentId_idx")
+  @@index([paymentRef], map: "ReferralOrder_paymentRef_idx")
+  @@index([paymentStatus], map: "ReferralOrder_paymentStatus_idx")
+  @@map("ReferralOrder")
+}
+
+// Weekly Commission Payouts
+model CommissionPayout {
+  id          Int      @id @default(autoincrement())
+  agentId     Int
+  amount      Float
+  weekStart   DateTime
+  weekEnd     DateTime
+  status      String   @default("Pending") @db.VarChar(50) // Pending, Paid
+  paidAt      DateTime?
+  reference   String?  @db.VarChar(255)
+  createdAt   DateTime @default(now())
+  agent       User     @relation("AgentPayouts", fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId], map: "CommissionPayout_agentId_idx")
+  @@index([status], map: "CommissionPayout_status_idx")
+  @@map("CommissionPayout")
+}
+
+// Chat Conversations between admin and agents
+model ChatConversation {
+  id            Int           @id @default(autoincrement())
+  participantA  Int           // admin userId
+  participantB  Int           // agent userId
+  lastMessageAt DateTime?
+  createdAt     DateTime      @default(now())
+  messages      ChatMessage[]
+
+  @@unique([participantA, participantB])
+  @@index([participantA], map: "ChatConversation_participantA_idx")
+  @@index([participantB], map: "ChatConversation_participantB_idx")
+  @@map("ChatConversation")
+}
+
+// Chat Messages with end-to-end encryption
+model ChatMessage {
+  id              Int              @id @default(autoincrement())
+  conversationId  Int
+  senderId        Int
+  content         String           @db.Text    // encrypted message content
+  iv              String           @db.VarChar(64)  // initialization vector for decryption
+  replyToId       Int?             // reply to another message
+  forwardedFrom   Int?             // original message id if forwarded
+  isDeleted       Boolean          @default(false)
+  deletedForAll   Boolean          @default(false)
+  readAt          DateTime?
+  createdAt       DateTime         @default(now())
+  conversation    ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  replyTo         ChatMessage?     @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies         ChatMessage[]    @relation("MessageReplies")
+
+  @@index([conversationId], map: "ChatMessage_conversationId_idx")
+  @@index([senderId], map: "ChatMessage_senderId_idx")
+  @@index([replyToId], map: "ChatMessage_replyToId_idx")
+  @@map("ChatMessage")
+}
+
+// Shop Chat Conversations between admin and shop customers (identified by phone)
+model ShopChatConversation {
+  id              Int               @id @default(autoincrement())
+  customerPhone   String            @db.VarChar(20)
+  adminId         Int               // admin userId
+  lastMessageAt   DateTime?
+  createdAt       DateTime          @default(now())
+  messages        ShopChatMessage[]
+
+  @@unique([customerPhone, adminId])
+  @@index([customerPhone], map: "ShopChatConversation_customerPhone_idx")
+  @@index([adminId], map: "ShopChatConversation_adminId_idx")
+  @@map("ShopChatConversation")
+}
+
+// Shop Chat Messages
+model ShopChatMessage {
+  id              Int                  @id @default(autoincrement())
+  conversationId  Int
+  senderType      String               @db.VarChar(10) // "customer" or "admin"
+  senderId        String               @db.VarChar(50) // phone number for customer, admin userId for admin
+  content         String               @db.Text
+  iv              String               @db.VarChar(64)
+  replyToId       Int?
+  isDeleted       Boolean              @default(false)
+  deletedForAll   Boolean              @default(false)
+  readAt          DateTime?
+  createdAt       DateTime             @default(now())
+  conversation    ShopChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  replyTo         ShopChatMessage?     @relation("ShopMessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies         ShopChatMessage[]    @relation("ShopMessageReplies")
+
+  @@index([conversationId], map: "ShopChatMessage_conversationId_idx")
+  @@index([senderType], map: "ShopChatMessage_senderType_idx")
+  @@index([replyToId], map: "ShopChatMessage_replyToId_idx")
+  @@map("ShopChatMessage")
+}
+
+// External API Keys for partner integrations
+model ExternalApiKey {
+  id           Int       @id @default(autoincrement())
+  partnerName  String
+  apiKey       String    @unique
+  isActive     Boolean   @default(true)
+  totalOrders  Int       @default(0)
+  lastUsedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
