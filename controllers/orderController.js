@@ -361,24 +361,14 @@ exports.uploadExcelOrders = async (req, res) => {
       return res.status(400).json({ success: false, errorReport });
     }
 
-    // All validations passed — create order batch directly
-    const batchService = require('../services/orderBatchService');
-
-    const { batch, order, totalCost: deducted } = await batchService.createBatchFromUpload(
-      agent.id,
-      req.file.originalname || 'uploaded_file.xlsx',
-      network,
-      productsToAdd
-    );
-
-    // Emit real-time notification to admin
-    try {
-      const { io } = require('../index');
-      io.emit('new-order', { orderId: order.id, userId: agent.id, itemCount: productsToAdd.length });
-    } catch (e) { /* socket emit is best-effort */ }
-
+    // All validations passed, add to cart
+    let added = 0;
+    for (const item of productsToAdd) {
+      await cartService.addItemToCart(agent.id, item.product.id, item.quantity, item.phoneNumber);
+      added++;
+    }
     fs.unlinkSync(filePath);
-    return res.json({ success: true, message: `${productsToAdd.length} orders placed successfully via file upload.`, summary: { total, added: productsToAdd.length }, batchId: batch.id, orderId: order.id, totalCost: deducted });
+    return res.json({ success: true, message: `${added} products added to cart.`, summary: { total, added } });
   } catch (err) {
     if (req.file && req.file.path) try { fs.unlinkSync(req.file.path); } catch (e) {}
     res.status(500).json({ success: false, message: err.message });
@@ -514,38 +504,21 @@ exports.uploadSimplifiedExcelOrders = async (req, res) => {
       });
     }
 
-    // All validations passed — get prices and create order batch directly
+    // All validations passed — add to cart
     const productService = require('../services/productService');
-    const batchService = require('../services/orderBatchService');
+    const cartService = require('../services/cartService');
 
-    // Assign prices based on user role
+    let added = 0;
     for (const item of productsToAdd) {
-      const price = productService.getPriceForUserRole(userRole, item.product);
-      item.price = price != null ? price : item.product.price;
+      await cartService.addItemToCart(agent.id, item.product.id, item.quantity || 1, item.phoneNumber);
+      added++;
     }
-
-    // Create batch + order directly (bypasses cart)
-    const { batch, order, totalCost } = await batchService.createBatchFromUpload(
-      agent.id,
-      req.file.originalname || 'uploaded_file.xlsx',
-      network,
-      productsToAdd
-    );
-
-    // Emit real-time notification to admin
-    try {
-      const { io } = require('../index');
-      io.emit('new-order', { orderId: order.id, userId: agent.id, itemCount: productsToAdd.length });
-    } catch (e) { /* socket emit is best-effort */ }
 
     fs.unlinkSync(filePath);
     return res.json({ 
         success: true, 
-        message: `${productsToAdd.length} orders placed successfully via file upload.`,
-        summary: { total, successful: productsToAdd.length, failed: 0 },
-        batchId: batch.id,
-        orderId: order.id,
-        totalCost
+        message: `${added} products added to cart.`,
+        summary: { total, successful: added, failed: 0 }
     });
 
   } catch (err) {
@@ -757,6 +730,50 @@ exports.cancelOrderItem = async (req, res) => {
 const orderBatchService = require('../services/orderBatchService');
 const xlsx = require('xlsx');
 
+exports.getPendingCounts = async (req, res) => {
+  try {
+    const counts = await orderBatchService.getPendingCountsByNetwork();
+    res.json({ success: true, counts });
+  } catch (error) {
+    console.error('Error fetching pending counts:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.exportPendingOrders = async (req, res) => {
+  try {
+    const { network } = req.body;
+    if (!network) return res.status(400).json({ success: false, message: 'Network is required' });
+
+    const adminUserId = req.user.id;
+    const { batch, rows, totalItems, totalPrice } = await orderBatchService.exportPendingByNetwork(adminUserId, network);
+
+    const worksheetData = rows.map(row => ({
+      'Order ID': row.orderId,
+      'Item ID': row.itemId,
+      'Agent': row.agent,
+      'Phone': row.phone,
+      'Product': row.product,
+      'Bundle': row.bundle,
+      'Price': row.price,
+      'Qty': row.quantity,
+      'Status': row.status
+    }));
+
+    const wb = xlsx.utils.book_new();
+    const ws = xlsx.utils.json_to_sheet(worksheetData);
+    xlsx.utils.book_append_sheet(wb, ws, 'Orders');
+    const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Disposition', `attachment; filename=${batch.filename}`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(buffer);
+  } catch (error) {
+    console.error('Error exporting pending orders:', error);
+    res.status(error.message.includes('No pending') ? 404 : 500).json({ success: false, message: error.message });
+  }
+};
+
 exports.getAllBatches = async (req, res) => {
   try {
     const batches = await orderBatchService.getAllBatches();
@@ -806,6 +823,7 @@ exports.downloadBatch = async (req, res) => {
     const worksheetData = rows.map(row => ({
       'Order ID': row.orderId,
       'Item ID': row.itemId,
+      'Agent': row.agent,
       'Phone': row.phone,
       'Product': row.product,
       'Bundle': row.bundle,
@@ -819,7 +837,7 @@ exports.downloadBatch = async (req, res) => {
     xlsx.utils.book_append_sheet(wb, ws, 'Orders');
     const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
 
-    res.setHeader('Content-Disposition', `attachment; filename=batch_${batch.id}_${batch.filename}`);
+    res.setHeader('Content-Disposition', `attachment; filename=${batch.filename}`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.send(buffer);
   } catch (error) {

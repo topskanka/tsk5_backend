@@ -57,7 +57,10 @@ const createShopOrder = async (productId, mobileNumber, customerName) => {
           productId: productId,
           quantity: 1,
           mobileNumber: mobileNumber,
-          status: "Pending"
+          status: "Pending",
+          productName: product.name,
+          productPrice: (product.usePromoPrice && product.promoPrice != null) ? product.promoPrice : product.price,
+          productDescription: product.description
         }]
       }
     },

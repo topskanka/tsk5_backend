@@ -39,6 +39,8 @@ router.get('/admin/download-excel', authMiddleware, adminMiddleware, orderContro
 
 // ==================== ORDER BATCH (Order Files) ====================
 // These MUST be above /admin/:userId to avoid being caught by the param route
+router.get('/admin/batches/pending-counts', authMiddleware, adminMiddleware, orderController.getPendingCounts);
+router.post('/admin/batches/export', authMiddleware, adminMiddleware, orderController.exportPendingOrders);
 router.get('/admin/batches', authMiddleware, adminMiddleware, orderController.getAllBatches);
 router.get('/admin/batches/:batchId', authMiddleware, adminMiddleware, orderController.getBatchById);
 router.put('/admin/batches/:batchId/status', authMiddleware, adminMiddleware, orderController.updateBatchStatus);

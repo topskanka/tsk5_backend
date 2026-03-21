@@ -421,7 +421,10 @@ const verifyReferralPayment = async (reference) => {
                 productId: referralOrder.productId,
                 quantity: 1,
                 mobileNumber: referralOrder.customerPhone,
-                status: 'Pending'
+                status: 'Pending',
+                productName: referralOrder.product.name,
+                productPrice: referralOrder.basePrice,
+                productDescription: referralOrder.product.description
               }]
             }
           },

@@ -2,17 +2,119 @@ const prisma = require("../config/db");
 const { createTransaction } = require("./transactionService");
 
 /**
- * Get all order batches with user info and order counts
+ * Get counts of pending order items grouped by network (for export UI)
+ */
+const getPendingCountsByNetwork = async () => {
+  // Find all pending OrderItems whose parent Order has NO batchId
+  // Include product relation as fallback for items without productName snapshot
+  const items = await prisma.orderItem.findMany({
+    where: {
+      status: "Pending",
+      order: { batchId: null }
+    },
+    select: { productName: true, productPrice: true, quantity: true, product: { select: { name: true, price: true } } }
+  });
+
+  const networks = { MTN: { count: 0, total: 0 }, TELECEL: { count: 0, total: 0 }, "AIRTEL TIGO": { count: 0, total: 0 } };
+
+  for (const item of items) {
+    const name = (item.productName || item.product?.name || "").toUpperCase();
+    for (const net of Object.keys(networks)) {
+      if (name.startsWith(net)) {
+        networks[net].count++;
+        networks[net].total += (item.productPrice || item.product?.price || 0) * item.quantity;
+        break;
+      }
+    }
+  }
+
+  return networks;
+};
+
+/**
+ * Export pending orders by network: creates a batch, links orders, returns rows for Excel
+ */
+const exportPendingByNetwork = async (adminUserId, network) => {
+  return await prisma.$transaction(async (tx) => {
+    // Find pending items matching the network whose order has no batchId
+    // Use OR to match both productName snapshot and product.name (fallback for old orders)
+    const pendingItems = await tx.orderItem.findMany({
+      where: {
+        status: "Pending",
+        order: { batchId: null },
+        OR: [
+          { productName: { startsWith: network.toUpperCase() } },
+          { productName: null, product: { name: { startsWith: network.toUpperCase() } } },
+          { productName: "", product: { name: { startsWith: network.toUpperCase() } } }
+        ]
+      },
+      include: {
+        order: { include: { user: { select: { id: true, name: true, phone: true } } } },
+        product: { select: { id: true, name: true, description: true, price: true } }
+      }
+    });
+
+    if (pendingItems.length === 0) {
+      throw new Error(`No pending orders found for ${network}`);
+    }
+
+    // Get distinct order IDs
+    const orderIdSet = new Set(pendingItems.map(item => item.orderId));
+    const orderIds = [...orderIdSet];
+
+    // Calculate totals
+    let totalPrice = 0;
+    for (const item of pendingItems) {
+      totalPrice += (item.productPrice || item.product.price) * item.quantity;
+    }
+
+    // Create the batch
+    const filename = `${network.toUpperCase()}_export_${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.xlsx`;
+    const batch = await tx.orderBatch.create({
+      data: {
+        userId: parseInt(adminUserId),
+        filename,
+        network: network.toUpperCase(),
+        totalItems: pendingItems.length,
+        totalPrice,
+        status: "Pending"
+      }
+    });
+
+    // Link orders to the batch
+    await tx.order.updateMany({
+      where: { id: { in: orderIds } },
+      data: { batchId: batch.id }
+    });
+
+    // Build Excel rows
+    const rows = pendingItems.map(item => ({
+      orderId: item.orderId,
+      itemId: item.id,
+      agent: item.order.user?.name || "N/A",
+      phone: item.mobileNumber || item.order.mobileNumber || "",
+      product: item.productName || item.product.name,
+      bundle: item.productDescription || item.product.description,
+      price: item.productPrice || item.product.price,
+      quantity: item.quantity,
+      status: item.status
+    }));
+
+    return { batch, rows, totalItems: pendingItems.length, totalPrice };
+  }, { timeout: 30000 });
+};
+
+/**
+ * Get all order batches with computed stats
  */
 const getAllBatches = async () => {
   const batches = await prisma.orderBatch.findMany({
     orderBy: { createdAt: "desc" },
     include: {
-      user: {
-        select: { id: true, name: true, email: true, phone: true }
-      },
+      user: { select: { id: true, name: true } },
       orders: {
         include: {
+          user: { select: { id: true, name: true } },
           items: {
             select: { id: true, status: true, productPrice: true, quantity: true }
           }
@@ -30,20 +132,27 @@ const getAllBatches = async () => {
       for (const item of order.items) {
         totalItems++;
         totalPrice += (item.productPrice || 0) * item.quantity;
-        const normalizedStatus = item.status === "Canceled" ? "Cancelled" : item.status;
-        if (statusCounts[normalizedStatus] !== undefined) {
-          statusCounts[normalizedStatus]++;
-        }
+        const s = item.status === "Canceled" ? "Cancelled" : item.status;
+        if (statusCounts[s] !== undefined) statusCounts[s]++;
       }
     }
 
-    // Determine overall batch status from items
     let overallStatus = batch.status;
     if (totalItems > 0) {
       if (statusCounts.Completed === totalItems) overallStatus = "Completed";
       else if (statusCounts.Cancelled === totalItems) overallStatus = "Cancelled";
       else if (statusCounts.Processing > 0) overallStatus = "Processing";
       else overallStatus = "Pending";
+    }
+
+    // Collect unique agents from the orders in the batch
+    const agents = [];
+    const seenAgents = new Set();
+    for (const order of batch.orders) {
+      if (order.user && !seenAgents.has(order.user.id)) {
+        seenAgents.add(order.user.id);
+        agents.push(order.user);
+      }
     }
 
     return {
@@ -55,7 +164,8 @@ const getAllBatches = async () => {
       status: overallStatus,
       statusCounts,
       createdAt: batch.createdAt,
-      user: batch.user,
+      exportedBy: batch.user,
+      agents,
       orderIds: batch.orders.map(o => o.id)
     };
   });
@@ -68,16 +178,13 @@ const getBatchById = async (batchId) => {
   const batch = await prisma.orderBatch.findUnique({
     where: { id: parseInt(batchId) },
     include: {
-      user: {
-        select: { id: true, name: true, email: true, phone: true }
-      },
+      user: { select: { id: true, name: true } },
       orders: {
         include: {
+          user: { select: { id: true, name: true, phone: true } },
           items: {
             include: {
-              product: {
-                select: { id: true, name: true, description: true, price: true }
-              }
+              product: { select: { id: true, name: true, description: true, price: true } }
             }
           }
         }
@@ -85,16 +192,12 @@ const getBatchById = async (batchId) => {
     }
   });
 
-  if (!batch) {
-    throw new Error("Order batch not found");
-  }
-
+  if (!batch) throw new Error("Order batch not found");
   return batch;
 };
 
 /**
- * Update status of all order items in a batch
- * Handles auto-refund when status is Cancelled
+ * Update status of all order items in a batch (auto-refund on cancel)
  */
 const updateBatchStatus = async (batchId, newStatus) => {
   const validStatuses = ["Pending", "Processing", "Completed", "Cancelled"];
@@ -107,32 +210,21 @@ const updateBatchStatus = async (batchId, newStatus) => {
       where: { id: parseInt(batchId) },
       include: {
         orders: {
-          include: {
-            items: {
-              include: { product: true }
-            }
-          }
+          include: { items: { include: { product: true } } }
         }
       }
     });
 
-    if (!batch) {
-      throw new Error("Order batch not found");
-    }
+    if (!batch) throw new Error("Order batch not found");
 
     let totalRefund = 0;
     let updatedCount = 0;
 
     for (const order of batch.orders) {
-      // If cancelling, handle refunds per order
       if (newStatus === "Cancelled") {
         const refundReference = `batch_refund:${batchId}:order:${order.id}`;
         const existingRefund = await tx.transaction.findFirst({
-          where: {
-            userId: order.userId,
-            type: "ORDER_ITEMS_REFUND",
-            reference: refundReference
-          }
+          where: { userId: order.userId, type: "ORDER_ITEMS_REFUND", reference: refundReference }
         });
 
         if (!existingRefund) {
@@ -142,22 +234,15 @@ const updateBatchStatus = async (batchId, newStatus) => {
               orderRefund += (item.productPrice || item.product.price) * item.quantity;
             }
           }
-
           if (orderRefund > 0) {
-            await createTransaction(
-              order.userId,
-              orderRefund,
-              "ORDER_ITEMS_REFUND",
+            await createTransaction(order.userId, orderRefund, "ORDER_ITEMS_REFUND",
               `Batch #${batchId} - Order #${order.id} cancelled & refunded (Amount: ${orderRefund})`,
-              refundReference,
-              tx
-            );
+              refundReference, tx);
             totalRefund += orderRefund;
           }
         }
       }
 
-      // Update all items in this order
       const result = await tx.orderItem.updateMany({
         where: { orderId: order.id },
         data: { status: newStatus }
@@ -165,18 +250,13 @@ const updateBatchStatus = async (batchId, newStatus) => {
       updatedCount += result.count;
     }
 
-    // Update batch status
     await tx.orderBatch.update({
       where: { id: parseInt(batchId) },
       data: { status: newStatus }
     });
 
     return {
-      success: true,
-      batchId: parseInt(batchId),
-      newStatus,
-      updatedItems: updatedCount,
-      totalRefund,
+      success: true, batchId: parseInt(batchId), newStatus, updatedItems: updatedCount, totalRefund,
       message: `Batch #${batchId}: ${updatedCount} items updated to ${newStatus}${totalRefund > 0 ? `, refunded GHS ${totalRefund.toFixed(2)}` : ''}`
     };
   }, { timeout: 30000 });
@@ -187,9 +267,7 @@ const updateBatchStatus = async (batchId, newStatus) => {
  */
 const updateBatchOrderItemStatus = async (batchId, itemId, newStatus) => {
   const validStatuses = ["Pending", "Processing", "Completed", "Cancelled"];
-  if (!validStatuses.includes(newStatus)) {
-    throw new Error("Invalid status");
-  }
+  if (!validStatuses.includes(newStatus)) throw new Error("Invalid status");
 
   return await prisma.$transaction(async (tx) => {
     const item = await tx.orderItem.findUnique({
@@ -198,34 +276,20 @@ const updateBatchOrderItemStatus = async (batchId, itemId, newStatus) => {
     });
 
     if (!item) throw new Error("Order item not found");
+    if (item.order.batchId !== parseInt(batchId)) throw new Error("Order item does not belong to this batch");
 
-    // Verify the item belongs to this batch
-    if (item.order.batchId !== parseInt(batchId)) {
-      throw new Error("Order item does not belong to this batch");
-    }
-
-    // Handle refund for cancellation
     if (newStatus === "Cancelled" && item.status !== "Cancelled" && item.status !== "Canceled") {
       const refundReference = `batch_item_refund:${batchId}:item:${itemId}`;
       const existingRefund = await tx.transaction.findFirst({
-        where: {
-          userId: item.order.userId,
-          type: "ORDER_ITEM_REFUND",
-          reference: refundReference
-        }
+        where: { userId: item.order.userId, type: "ORDER_ITEM_REFUND", reference: refundReference }
       });
 
       if (!existingRefund) {
         const refundAmount = (item.productPrice || item.product.price) * item.quantity;
         if (refundAmount > 0) {
-          await createTransaction(
-            item.order.userId,
-            refundAmount,
-            "ORDER_ITEM_REFUND",
+          await createTransaction(item.order.userId, refundAmount, "ORDER_ITEM_REFUND",
             `Batch #${batchId} - Item #${itemId} cancelled & refunded (Amount: ${refundAmount})`,
-            refundReference,
-            tx
-          );
+            refundReference, tx);
         }
       }
     }
@@ -240,21 +304,17 @@ const updateBatchOrderItemStatus = async (batchId, itemId, newStatus) => {
 };
 
 /**
- * Get batch orders formatted for Excel download
+ * Re-download a batch as Excel (for re-export)
  */
 const getBatchForDownload = async (batchId) => {
   const batch = await prisma.orderBatch.findUnique({
     where: { id: parseInt(batchId) },
     include: {
-      user: { select: { name: true } },
       orders: {
         include: {
+          user: { select: { name: true } },
           items: {
-            include: {
-              product: {
-                select: { name: true, description: true, price: true }
-              }
-            }
+            include: { product: { select: { name: true, description: true, price: true } } }
           }
         }
       }
@@ -269,7 +329,8 @@ const getBatchForDownload = async (batchId) => {
       rows.push({
         orderId: order.id,
         itemId: item.id,
-        phone: item.mobileNumber || order.mobileNumber || '',
+        agent: order.user?.name || "N/A",
+        phone: item.mobileNumber || order.mobileNumber || "",
         product: item.productName || item.product.name,
         bundle: item.productDescription || item.product.description,
         price: item.productPrice || item.product.price,
@@ -282,79 +343,12 @@ const getBatchForDownload = async (batchId) => {
   return { batch, rows };
 };
 
-/**
- * Create order batch from file upload data (creates orders directly, bypasses cart)
- */
-const createBatchFromUpload = async (userId, filename, network, productsToAdd) => {
-  return await prisma.$transaction(async (tx) => {
-    const user = await tx.user.findUnique({ where: { id: parseInt(userId) } });
-    if (!user) throw new Error("User not found");
-
-    // Calculate total cost
-    let totalCost = 0;
-    for (const item of productsToAdd) {
-      totalCost += item.price * (item.quantity || 1);
-    }
-
-    // Check wallet balance
-    if (user.loanBalance < totalCost) {
-      throw new Error(`Insufficient wallet balance. Required: GHS ${totalCost.toFixed(2)}, Available: GHS ${user.loanBalance.toFixed(2)}`);
-    }
-
-    // Create the batch
-    const batch = await tx.orderBatch.create({
-      data: {
-        userId: parseInt(userId),
-        filename,
-        network: network || null,
-        totalItems: productsToAdd.length,
-        totalPrice: totalCost,
-        status: "Pending"
-      }
-    });
-
-    // Create a single order with all items, linked to batch
-    const order = await tx.order.create({
-      data: {
-        userId: parseInt(userId),
-        batchId: batch.id,
-        status: "Pending",
-        items: {
-          create: productsToAdd.map(item => ({
-            productId: item.product.id,
-            quantity: item.quantity || 1,
-            mobileNumber: item.phoneNumber || null,
-            status: "Pending",
-            productName: item.product.name,
-            productPrice: item.price,
-            productDescription: item.product.description
-          }))
-        }
-      },
-      include: {
-        items: { include: { product: true } }
-      }
-    });
-
-    // Deduct from wallet
-    await createTransaction(
-      parseInt(userId),
-      -totalCost,
-      "ORDER",
-      `Order #${order.id} placed via file upload (Batch #${batch.id}, ${productsToAdd.length} items)`,
-      `order:${order.id}`,
-      tx
-    );
-
-    return { batch, order, totalCost };
-  }, { timeout: 30000, maxWait: 15000 });
-};
-
 module.exports = {
+  getPendingCountsByNetwork,
+  exportPendingByNetwork,
   getAllBatches,
   getBatchById,
   updateBatchStatus,
   updateBatchOrderItemStatus,
-  getBatchForDownload,
-  createBatchFromUpload
+  getBatchForDownload
 };
