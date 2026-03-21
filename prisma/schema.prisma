@@ -34,6 +34,7 @@ model User {
   storefrontSlug   String?       @unique @db.VarChar(100) // Unique storefront URL slug
   cart             Cart?
   orders           Order[]
+  orderBatches     OrderBatch[]
   TopUp            TopUp[]
   transactions     Transaction[]
   storefrontProducts StorefrontProduct[] @relation("AgentStorefront")
@@ -80,17 +81,36 @@ model Product {
   @@map("Product")
 }
 
+model OrderBatch {
+  id          Int       @id @default(autoincrement())
+  userId      Int
+  filename    String    @db.VarChar(255)
+  totalItems  Int       @default(0)
+  totalPrice  Float     @default(0)
+  status      String    @default("Pending")
+  network     String?   @db.VarChar(50)
+  createdAt   DateTime  @default(now())
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders      Order[]
+
+  @@index([userId], map: "OrderBatch_userId_fkey")
+  @@map("OrderBatch")
+}
+
 model Order {
-  id           Int         @id @default(autoincrement())
+  id           Int          @id @default(autoincrement())
   userId       Int
-  createdAt    DateTime    @default(now())
-  status       String      @default("Pending")
+  createdAt    DateTime     @default(now())
+  status       String       @default("Pending")
   mobileNumber String?
-  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  batchId      Int?
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  batch        OrderBatch?  @relation(fields: [batchId], references: [id], onDelete: SetNull)
   items        OrderItem[]
 
   @@index([userId], map: "Order_userId_fkey")
   @@index([userId, createdAt])
+  @@index([batchId], map: "Order_batchId_fkey")
   @@map("Order")
 }
 
