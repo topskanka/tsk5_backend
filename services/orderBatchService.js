@@ -87,6 +87,19 @@ const exportPendingByNetwork = async (adminUserId, network) => {
       data: { batchId: batch.id }
     });
 
+    // Auto-update exported items from Pending to Processing
+    const itemIds = pendingItems.map(item => item.id);
+    await tx.orderItem.updateMany({
+      where: { id: { in: itemIds } },
+      data: { status: "Processing" }
+    });
+
+    // Update the batch status to Processing as well
+    await tx.orderBatch.update({
+      where: { id: batch.id },
+      data: { status: "Processing" }
+    });
+
     // Build Excel rows
     const rows = pendingItems.map(item => ({
       orderId: item.orderId,
@@ -97,7 +110,7 @@ const exportPendingByNetwork = async (adminUserId, network) => {
       bundle: item.productDescription || item.product.description,
       price: item.productPrice || item.product.price,
       quantity: item.quantity,
-      status: item.status
+      status: "Processing"
     }));
 
     return { batch, rows, totalItems: pendingItems.length, totalPrice };
