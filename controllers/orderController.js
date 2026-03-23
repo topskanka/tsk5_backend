@@ -311,12 +311,11 @@ exports.uploadExcelOrders = async (req, res) => {
       const phoneNumber = row['phone'] ? String(row['phone']).trim() : '';
       const item = row['item'] ? String(row['item']).trim() : '';
       const bundleAmount = row['bundle amount'] ? String(row['bundle amount']).trim() : '';
-      const quantity = row['quantity'] ? parseInt(row['quantity']) : 1;
+      const quantity = 1;
       let rowErrors = [];
       if (!phoneNumber) rowErrors.push('Missing phone');
       if (!item) rowErrors.push('Missing item (e.g: MTN - SUPERAGENT)');
       if (!bundleAmount) rowErrors.push('Missing bundle amount (e.g: 50GB)');
-      if (quantity < 1 || isNaN(quantity)) rowErrors.push('Invalid quantity');
       // Lookup product by item and bundle amount
       let product = await prisma.product.findFirst({
         where: {
@@ -748,17 +747,12 @@ exports.exportPendingOrders = async (req, res) => {
     const adminUserId = req.user.id;
     const { batch, rows, totalItems, totalPrice } = await orderBatchService.exportPendingByNetwork(adminUserId, network);
 
-    const worksheetData = rows.map(row => ({
-      'Order ID': row.orderId,
-      'Item ID': row.itemId,
-      'Agent': row.agent,
-      'Phone': row.phone,
-      'Product': row.product,
-      'Bundle': row.bundle,
-      'Price': row.price,
-      'Qty': row.quantity,
-      'Status': row.status
-    }));
+    const worksheetData = rows.map(row => {
+      let phone = row.phone || '';
+      if (phone.startsWith('233')) phone = '0' + phone.substring(3);
+      const dataSize = (row.bundle || '').replace(/[^0-9.]/g, '');
+      return { 'Phone Number': phone, 'Data Size': dataSize };
+    });
 
     const wb = xlsx.utils.book_new();
     const ws = xlsx.utils.json_to_sheet(worksheetData);
@@ -820,17 +814,12 @@ exports.downloadBatch = async (req, res) => {
   try {
     const { batch, rows } = await orderBatchService.getBatchForDownload(req.params.batchId);
 
-    const worksheetData = rows.map(row => ({
-      'Order ID': row.orderId,
-      'Item ID': row.itemId,
-      'Agent': row.agent,
-      'Phone': row.phone,
-      'Product': row.product,
-      'Bundle': row.bundle,
-      'Price': row.price,
-      'Qty': row.quantity,
-      'Status': row.status
-    }));
+    const worksheetData = rows.map(row => {
+      let phone = row.phone || '';
+      if (phone.startsWith('233')) phone = '0' + phone.substring(3);
+      const dataSize = (row.bundle || '').replace(/[^0-9.]/g, '');
+      return { 'Phone Number': phone, 'Data Size': dataSize };
+    });
 
     const wb = xlsx.utils.book_new();
     const ws = xlsx.utils.json_to_sheet(worksheetData);
