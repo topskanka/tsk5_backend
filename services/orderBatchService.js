@@ -5,12 +5,11 @@ const { createTransaction } = require("./transactionService");
  * Get counts of pending order items grouped by network (for export UI)
  */
 const getPendingCountsByNetwork = async () => {
-  // Find all pending OrderItems whose parent Order has NO batchId
-  // Include product relation as fallback for items without productName snapshot
+  // Find all pending OrderItems that have NOT been assigned to any batch yet
   const items = await prisma.orderItem.findMany({
     where: {
       status: "Pending",
-      order: { batchId: null }
+      batchId: null
     },
     select: { productName: true, productPrice: true, quantity: true, product: { select: { name: true, price: true } } }
   });
@@ -36,12 +35,11 @@ const getPendingCountsByNetwork = async () => {
  */
 const exportPendingByNetwork = async (adminUserId, network) => {
   return await prisma.$transaction(async (tx) => {
-    // Find pending items matching the network whose order has no batchId
-    // Use OR to match both productName snapshot and product.name (fallback for old orders)
+    // Find pending items matching the network that have NOT been assigned to any batch
     const pendingItems = await tx.orderItem.findMany({
       where: {
         status: "Pending",
-        order: { batchId: null },
+        batchId: null,
         OR: [
           { productName: { startsWith: network.toUpperCase() } },
           { productName: null, product: { name: { startsWith: network.toUpperCase() } } },
@@ -81,17 +79,17 @@ const exportPendingByNetwork = async (adminUserId, network) => {
       }
     });
 
-    // Link orders to the batch
+    // Link orders to the batch (only if not already linked to another batch)
     await tx.order.updateMany({
-      where: { id: { in: orderIds } },
+      where: { id: { in: orderIds }, batchId: null },
       data: { batchId: batch.id }
     });
 
-    // Auto-update exported items from Pending to Processing
+    // Set batchId on each exported item AND update status to Processing
     const itemIds = pendingItems.map(item => item.id);
     await tx.orderItem.updateMany({
       where: { id: { in: itemIds } },
-      data: { status: "Processing" }
+      data: { status: "Processing", batchId: batch.id }
     });
 
     // Update the batch status to Processing as well
@@ -125,12 +123,10 @@ const getAllBatches = async () => {
     orderBy: { createdAt: "desc" },
     include: {
       user: { select: { id: true, name: true } },
-      orders: {
-        include: {
-          user: { select: { id: true, name: true } },
-          items: {
-            select: { id: true, status: true, productPrice: true, quantity: true }
-          }
+      items: {
+        select: {
+          id: true, status: true, productPrice: true, quantity: true,
+          order: { select: { id: true, user: { select: { id: true, name: true } } } }
         }
       }
     }
@@ -141,13 +137,11 @@ const getAllBatches = async () => {
     let totalPrice = 0;
     let statusCounts = { Pending: 0, Processing: 0, Completed: 0, Cancelled: 0 };
 
-    for (const order of batch.orders) {
-      for (const item of order.items) {
-        totalItems++;
-        totalPrice += (item.productPrice || 0) * item.quantity;
-        const s = item.status === "Canceled" ? "Cancelled" : item.status;
-        if (statusCounts[s] !== undefined) statusCounts[s]++;
-      }
+    for (const item of batch.items) {
+      totalItems++;
+      totalPrice += (item.productPrice || 0) * item.quantity;
+      const s = item.status === "Canceled" ? "Cancelled" : item.status;
+      if (statusCounts[s] !== undefined) statusCounts[s]++;
     }
 
     let overallStatus = batch.status;
@@ -158,13 +152,13 @@ const getAllBatches = async () => {
       else overallStatus = "Pending";
     }
 
-    // Collect unique agents from the orders in the batch
     const agents = [];
     const seenAgents = new Set();
-    for (const order of batch.orders) {
-      if (order.user && !seenAgents.has(order.user.id)) {
-        seenAgents.add(order.user.id);
-        agents.push(order.user);
+    for (const item of batch.items) {
+      const user = item.order?.user;
+      if (user && !seenAgents.has(user.id)) {
+        seenAgents.add(user.id);
+        agents.push(user);
       }
     }
 
@@ -179,7 +173,7 @@ const getAllBatches = async () => {
       createdAt: batch.createdAt,
       exportedBy: batch.user,
       agents,
-      orderIds: batch.orders.map(o => o.id)
+      orderIds: [...new Set(batch.items.map(i => i.order?.id).filter(Boolean))]
     };
   });
 };
@@ -192,20 +186,32 @@ const getBatchById = async (batchId) => {
     where: { id: parseInt(batchId) },
     include: {
       user: { select: { id: true, name: true } },
-      orders: {
+      items: {
         include: {
-          user: { select: { id: true, name: true, phone: true } },
-          items: {
-            include: {
-              product: { select: { id: true, name: true, description: true, price: true } }
-            }
-          }
+          order: { include: { user: { select: { id: true, name: true, phone: true } } } },
+          product: { select: { id: true, name: true, description: true, price: true } }
         }
       }
     }
   });
 
   if (!batch) throw new Error("Order batch not found");
+
+  // Restructure items into orders format for frontend compatibility
+  const orderMap = new Map();
+  for (const item of batch.items) {
+    const orderId = item.orderId;
+    if (!orderMap.has(orderId)) {
+      orderMap.set(orderId, {
+        id: orderId,
+        user: item.order?.user || null,
+        items: []
+      });
+    }
+    orderMap.get(orderId).items.push(item);
+  }
+  batch.orders = [...orderMap.values()];
+
   return batch;
 };
 
@@ -222,8 +228,8 @@ const updateBatchStatus = async (batchId, newStatus) => {
     const batch = await tx.orderBatch.findUnique({
       where: { id: parseInt(batchId) },
       include: {
-        orders: {
-          include: { items: { include: { product: true } } }
+        items: {
+          include: { order: true, product: true }
         }
       }
     });
@@ -233,35 +239,45 @@ const updateBatchStatus = async (batchId, newStatus) => {
     let totalRefund = 0;
     let updatedCount = 0;
 
-    for (const order of batch.orders) {
-      if (newStatus === "Cancelled") {
-        const refundReference = `batch_refund:${batchId}:order:${order.id}`;
+    if (newStatus === "Cancelled") {
+      // Group items by order for refund processing
+      const orderItemsMap = new Map();
+      for (const item of batch.items) {
+        if (!orderItemsMap.has(item.orderId)) {
+          orderItemsMap.set(item.orderId, { order: item.order, items: [] });
+        }
+        orderItemsMap.get(item.orderId).items.push(item);
+      }
+
+      for (const [orderId, { order, items }] of orderItemsMap) {
+        const refundReference = `batch_refund:${batchId}:order:${orderId}`;
         const existingRefund = await tx.transaction.findFirst({
           where: { userId: order.userId, type: "ORDER_ITEMS_REFUND", reference: refundReference }
         });
 
         if (!existingRefund) {
           let orderRefund = 0;
-          for (const item of order.items) {
+          for (const item of items) {
             if (item.status !== "Cancelled" && item.status !== "Canceled") {
               orderRefund += (item.productPrice || item.product.price) * item.quantity;
             }
           }
           if (orderRefund > 0) {
             await createTransaction(order.userId, orderRefund, "ORDER_ITEMS_REFUND",
-              `Batch #${batchId} - Order #${order.id} cancelled & refunded (Amount: ${orderRefund})`,
+              `Batch #${batchId} - Order #${orderId} cancelled & refunded (Amount: ${orderRefund})`,
               refundReference, tx);
             totalRefund += orderRefund;
           }
         }
       }
-
-      const result = await tx.orderItem.updateMany({
-        where: { orderId: order.id },
-        data: { status: newStatus }
-      });
-      updatedCount += result.count;
     }
+
+    // Update all items in this batch by their batchId
+    const result = await tx.orderItem.updateMany({
+      where: { batchId: parseInt(batchId) },
+      data: { status: newStatus }
+    });
+    updatedCount = result.count;
 
     await tx.orderBatch.update({
       where: { id: parseInt(batchId) },
@@ -289,7 +305,7 @@ const updateBatchOrderItemStatus = async (batchId, itemId, newStatus) => {
     });
 
     if (!item) throw new Error("Order item not found");
-    if (item.order.batchId !== parseInt(batchId)) throw new Error("Order item does not belong to this batch");
+    if (item.batchId !== parseInt(batchId)) throw new Error("Order item does not belong to this batch");
 
     if (newStatus === "Cancelled" && item.status !== "Cancelled" && item.status !== "Canceled") {
       const refundReference = `batch_item_refund:${batchId}:item:${itemId}`;
@@ -323,12 +339,10 @@ const getBatchForDownload = async (batchId) => {
   const batch = await prisma.orderBatch.findUnique({
     where: { id: parseInt(batchId) },
     include: {
-      orders: {
+      items: {
         include: {
-          user: { select: { name: true } },
-          items: {
-            include: { product: { select: { name: true, description: true, price: true } } }
-          }
+          order: { include: { user: { select: { name: true } } } },
+          product: { select: { name: true, description: true, price: true } }
         }
       }
     }
@@ -336,22 +350,17 @@ const getBatchForDownload = async (batchId) => {
 
   if (!batch) throw new Error("Batch not found");
 
-  const rows = [];
-  for (const order of batch.orders) {
-    for (const item of order.items) {
-      rows.push({
-        orderId: order.id,
-        itemId: item.id,
-        agent: order.user?.name || "N/A",
-        phone: item.mobileNumber || order.mobileNumber || "",
-        product: item.productName || item.product.name,
-        bundle: item.productDescription || item.product.description,
-        price: item.productPrice || item.product.price,
-        quantity: item.quantity,
-        status: item.status
-      });
-    }
-  }
+  const rows = batch.items.map(item => ({
+    orderId: item.orderId,
+    itemId: item.id,
+    agent: item.order?.user?.name || "N/A",
+    phone: item.mobileNumber || item.order?.mobileNumber || "",
+    product: item.productName || item.product.name,
+    bundle: item.productDescription || item.product.description,
+    price: item.productPrice || item.product.price,
+    quantity: item.quantity,
+    status: item.status
+  }));
 
   return { batch, rows };
 };
