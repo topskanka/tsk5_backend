@@ -118,28 +118,40 @@ const exportPendingByNetwork = async (adminUserId, network) => {
 /**
  * Get all order batches with computed stats
  */
-const getAllBatches = async () => {
-  const batches = await prisma.orderBatch.findMany({
-    orderBy: { createdAt: "desc" },
-    include: {
-      user: { select: { id: true, name: true } },
-      items: {
-        select: {
-          id: true, status: true, productPrice: true, quantity: true,
-          order: { select: { id: true, user: { select: { id: true, name: true } } } }
+const getAllBatches = async (page = 1, limit = 20) => {
+  const skip = (page - 1) * limit;
+
+  const [totalCount, batches] = await Promise.all([
+    prisma.orderBatch.count(),
+    prisma.orderBatch.findMany({
+      orderBy: { createdAt: "desc" },
+      skip,
+      take: limit,
+      select: {
+        id: true,
+        filename: true,
+        network: true,
+        totalItems: true,
+        totalPrice: true,
+        status: true,
+        createdAt: true,
+        user: { select: { id: true, name: true } },
+        _count: { select: { items: true } },
+        items: {
+          select: {
+            id: true, status: true,
+            order: { select: { id: true, user: { select: { id: true, name: true } } } }
+          }
         }
       }
-    }
-  });
+    })
+  ]);
 
-  return batches.map(batch => {
-    let totalItems = 0;
-    let totalPrice = 0;
+  const result = batches.map(batch => {
+    const totalItems = batch.totalItems || batch._count.items;
     let statusCounts = { Pending: 0, Processing: 0, Completed: 0, Cancelled: 0 };
 
     for (const item of batch.items) {
-      totalItems++;
-      totalPrice += (item.productPrice || 0) * item.quantity;
       const s = item.status === "Canceled" ? "Cancelled" : item.status;
       if (statusCounts[s] !== undefined) statusCounts[s]++;
     }
@@ -167,7 +179,7 @@ const getAllBatches = async () => {
       filename: batch.filename,
       network: batch.network,
       totalItems,
-      totalPrice,
+      totalPrice: batch.totalPrice,
       status: overallStatus,
       statusCounts,
       createdAt: batch.createdAt,
@@ -176,6 +188,14 @@ const getAllBatches = async () => {
       orderIds: [...new Set(batch.items.map(i => i.order?.id).filter(Boolean))]
     };
   });
+
+  return {
+    batches: result,
+    pagination: {
+      page, limit, total: totalCount,
+      totalPages: Math.ceil(totalCount / limit)
+    }
+  };
 };
 
 /**

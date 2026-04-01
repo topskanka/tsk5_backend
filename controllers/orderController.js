@@ -770,8 +770,9 @@ exports.exportPendingOrders = async (req, res) => {
 
 exports.getAllBatches = async (req, res) => {
   try {
-    const batches = await orderBatchService.getAllBatches();
-    res.json({ success: true, batches });
+    const { page = 1, limit = 20 } = req.query;
+    const result = await orderBatchService.getAllBatches(parseInt(page), parseInt(limit));
+    res.json({ success: true, batches: result.batches, pagination: result.pagination });
   } catch (error) {
     console.error('Error fetching batches:', error);
     res.status(500).json({ success: false, message: error.message });

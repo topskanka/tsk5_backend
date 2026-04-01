@@ -107,27 +107,47 @@ class SmsService {
   }
 
   // Get payment received messages (updated to handle both formats)
-  async getPaymentReceivedMessages() {
+  async getPaymentReceivedMessages(page = 1, limit = 50, search = null) {
     try {
-      return await prisma.smsMessage.findMany({
-        where: {
-          OR: [
-            {
-              message: {
-                contains: "Payment received",
-              }
-            },
-            {
-              message: {
-                contains: "You have received",
-              }
-            }
-          ]
-        },
-        orderBy: {
-          createdAt: 'desc'
+      const where = {
+        OR: [
+          { message: { contains: "Payment received" } },
+          { message: { contains: "You have received" } }
+        ]
+      };
+
+      if (search) {
+        where.AND = [
+          {
+            OR: [
+              { phoneNumber: { contains: search } },
+              { message: { contains: search } },
+              { reference: { contains: search } }
+            ]
+          }
+        ];
+      }
+
+      const skip = (page - 1) * limit;
+
+      const [totalCount, messages] = await Promise.all([
+        prisma.smsMessage.count({ where }),
+        prisma.smsMessage.findMany({
+          where,
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: limit
+        })
+      ]);
+
+      return {
+        data: messages,
+        pagination: {
+          page, limit, total: totalCount,
+          totalPages: Math.ceil(totalCount / limit),
+          hasNext: page < Math.ceil(totalCount / limit)
         }
-      });
+      };
     } catch (error) {
       console.error("Error fetching payment messages:", error);
       throw new Error(`Failed to fetch payment messages: ${error.message}`);

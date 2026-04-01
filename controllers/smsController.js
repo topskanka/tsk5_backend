@@ -81,8 +81,9 @@ class SmsController {
 
   async getPaymentReceivedMessages(req, res) {
     try {
-      const messages = await smsService.getPaymentReceivedMessages();
-      res.status(200).json({ success: true, data: messages });
+      const { page = 1, limit = 50, search } = req.query;
+      const result = await smsService.getPaymentReceivedMessages(parseInt(page), parseInt(limit), search || null);
+      res.status(200).json({ success: true, data: result.data, pagination: result.pagination });
     } catch (error) {
       console.error("Controller Error:", error);
       res.status(500).json({ success: false, message: error.message });

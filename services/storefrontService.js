@@ -527,23 +527,41 @@ const getAllReferralOrders = async (filters = {}) => {
     };
   }
 
-  const orders = await prisma.referralOrder.findMany({
-    where,
-    include: {
-      agent: { select: { id: true, name: true, phone: true, role: true } },
-      product: { select: { id: true, name: true, description: true, price: true } }
-    },
-    orderBy: { createdAt: 'desc' }
-  });
+  const page = parseInt(filters.page) || 1;
+  const limit = parseInt(filters.limit) || 50;
+  const skip = (page - 1) * limit;
 
-  // Calculate summary
-  const paidOrders = orders.filter(o => o.paymentStatus === 'Paid');
-  const totalCommission = paidOrders.reduce((sum, o) => sum + o.commission, 0);
-  const unpaidCommission = paidOrders.filter(o => !o.commissionPaid).reduce((sum, o) => sum + o.commission, 0);
+  // Run paginated orders + stats in parallel
+  const [totalCount, orders, statsAgg, unpaidAgg] = await Promise.all([
+    prisma.referralOrder.count({ where }),
+    prisma.referralOrder.findMany({
+      where,
+      include: {
+        agent: { select: { id: true, name: true, phone: true, role: true } },
+        product: { select: { id: true, name: true, description: true, price: true } }
+      },
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limit
+    }),
+    prisma.referralOrder.aggregate({
+      where: { ...where, paymentStatus: 'Paid' },
+      _sum: { commission: true },
+      _count: true
+    }),
+    prisma.referralOrder.aggregate({
+      where: { ...where, paymentStatus: 'Paid', commissionPaid: false },
+      _sum: { commission: true }
+    })
+  ]);
 
-  // Group by agent
+  const totalCommission = statsAgg._sum.commission || 0;
+  const paidOrdersCount = statsAgg._count || 0;
+  const unpaidCommission = unpaidAgg._sum.commission || 0;
+
+  // Group by agent from current page only (lightweight)
   const agentSummary = {};
-  paidOrders.forEach(order => {
+  orders.filter(o => o.paymentStatus === 'Paid').forEach(order => {
     const agentId = order.agentId;
     if (!agentSummary[agentId]) {
       agentSummary[agentId] = {
@@ -563,12 +581,17 @@ const getAllReferralOrders = async (filters = {}) => {
   return {
     orders,
     stats: {
-      totalOrders: orders.length,
-      paidOrders: paidOrders.length,
+      totalOrders: totalCount,
+      paidOrders: paidOrdersCount,
       totalCommission,
       unpaidCommission
     },
-    agentSummary: Object.values(agentSummary)
+    agentSummary: Object.values(agentSummary),
+    pagination: {
+      page, limit, total: totalCount,
+      totalPages: Math.ceil(totalCount / limit),
+      hasNext: page < Math.ceil(totalCount / limit)
+    }
   };
 };
 

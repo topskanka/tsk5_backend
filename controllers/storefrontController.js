@@ -187,7 +187,9 @@ const getAllReferralOrders = async (req, res) => {
       paymentStatus: req.query.paymentStatus,
       commissionPaid: req.query.commissionPaid,
       startDate: req.query.startDate,
-      endDate: req.query.endDate
+      endDate: req.query.endDate,
+      page: req.query.page,
+      limit: req.query.limit
     };
 
     const result = await storefrontService.getAllReferralOrders(filters);
