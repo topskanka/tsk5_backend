@@ -1,4 +1,29 @@
 const topupPaymentService = require("../services/topupPaymentService");
+const prisma = require("../config/db");
+
+// Helper: emit 'balance-updated' WebSocket event to a specific user after a top-up
+// so the frontend wallet refreshes in real-time without requiring logout/login.
+const emitTopupBalanceUpdate = async (userId, type = 'TOPUP', amount = 0) => {
+  try {
+    const { io, userSockets } = require("../index");
+    if (!io || !userSockets) return;
+    const user = await prisma.user.findUnique({
+      where: { id: parseInt(userId) },
+      select: { loanBalance: true, adminLoanBalance: true, hasLoan: true }
+    });
+    if (!user) return;
+    const socketId = userSockets.get(String(userId)) || userSockets.get(userId);
+    if (socketId) {
+      io.to(socketId).emit('balance-updated', {
+        loanBalance: user.loanBalance,
+        adminLoanBalance: user.adminLoanBalance,
+        hasLoan: user.hasLoan,
+        type,
+        amount
+      });
+    }
+  } catch (e) { /* socket emit is best-effort */ }
+};
 
 // Initialize Paystack payment for wallet top-up
 const initializeTopup = async (req, res) => {
@@ -51,6 +76,14 @@ const verifyTopup = async (req, res) => {
     const result = await topupPaymentService.verifyTopupPayment(reference);
 
     if (result.success) {
+      // Push live wallet refresh to the agent so they see the new balance immediately
+      if (result.userId || result.topupId) {
+        try {
+          const topupRow = result.userId ? null : await prisma.topUp.findUnique({ where: { id: result.topupId }, select: { userId: true } });
+          const uid = result.userId || topupRow?.userId;
+          if (uid) await emitTopupBalanceUpdate(uid, 'TOPUP_PAYSTACK', result.amount || 0);
+        } catch (_) { /* best-effort */ }
+      }
       res.status(200).json(result);
     } else if (result.pending) {
       res.status(202).json(result);
@@ -126,6 +159,11 @@ const verifyTransactionId = async (req, res) => {
     }
 
     const result = await topupPaymentService.verifyTransactionIdTopup(userId, referenceId);
+
+    // Push live wallet refresh so the agent sees the new balance without logout/login
+    if (result && result.success) {
+      await emitTopupBalanceUpdate(userId, 'TOPUP_TRANSACTION_ID', result.amount || 0);
+    }
 
     res.status(200).json(result);
   } catch (error) {

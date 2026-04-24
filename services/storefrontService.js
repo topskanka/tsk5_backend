@@ -21,6 +21,17 @@ const generateStorefrontSlug = (name) => {
   return `${base}-${random}`;
 };
 
+// Pick the promo-aware effective price for a product. Matches the logic used
+// across shopService / orderService / externalApiService / paymentController
+// so the Storefront surface (the only place that previously ignored promos)
+// now behaves consistently with the rest of the system.
+const effectivePriceOf = (product) => {
+  if (!product) return 0;
+  return (product.usePromoPrice && typeof product.promoPrice === 'number')
+    ? product.promoPrice
+    : (product.price || 0);
+};
+
 // ==================== AGENT STOREFRONT MANAGEMENT ====================
 
 // Get or create storefront slug for an agent
@@ -77,26 +88,55 @@ const getAvailableProducts = async (agentId) => {
     nameFilter = { name: { contains: ` - ${role}` } };
   }
 
-  return await prisma.product.findMany({
+  const products = await prisma.product.findMany({
     where: {
       stock: { gt: 0 },
       ...nameFilter
     },
     orderBy: [{ name: 'asc' }, { price: 'asc' }]
   });
+
+  // Expose the promo-aware price as `price` so the storefront UI (and its
+  // min-price validation) operates on what the agent actually pays. Keep
+  // the original `price` accessible as `basePrice` in case the client
+  // wants to show a strikethrough or promo badge.
+  return products.map(p => ({
+    ...p,
+    basePrice: p.price,
+    onPromo: Boolean(p.usePromoPrice && typeof p.promoPrice === 'number'),
+    price: effectivePriceOf(p)
+  }));
 };
 
 // Get agent's storefront products
 const getAgentStorefrontProducts = async (agentId) => {
-  return await prisma.storefrontProduct.findMany({
+  const rows = await prisma.storefrontProduct.findMany({
     where: { agentId: parseInt(agentId) },
     include: {
       product: {
-        select: { id: true, name: true, description: true, price: true, stock: true }
+        select: {
+          id: true, name: true, description: true, price: true,
+          promoPrice: true, usePromoPrice: true, stock: true
+        }
       }
     },
     orderBy: { createdAt: 'desc' }
   });
+
+  // Rewrite each product's `price` to the effective (promo-aware) price so
+  // the agent's "Base Price" and the "Your Profit" calculation on the UI
+  // reflect the current active price — matching how orders actually charge.
+  return rows.map(sp => ({
+    ...sp,
+    product: sp.product
+      ? {
+          ...sp.product,
+          basePrice: sp.product.price,
+          onPromo: Boolean(sp.product.usePromoPrice && typeof sp.product.promoPrice === 'number'),
+          price: effectivePriceOf(sp.product)
+        }
+      : sp.product
+  }));
 };
 
 // Add product to agent's storefront
@@ -106,9 +146,10 @@ const addProductToStorefront = async (agentId, productId, customPrice) => {
   });
 
   if (!product) throw new Error('Product not found');
-  
-  if (parseFloat(customPrice) < product.price) {
-    throw new Error(`Custom price cannot be less than base price (GHS ${product.price})`);
+
+  const basePrice = effectivePriceOf(product);
+  if (parseFloat(customPrice) < basePrice) {
+    throw new Error(`Custom price cannot be less than base price (GHS ${basePrice})`);
   }
 
   // Check if already exists
@@ -153,8 +194,9 @@ const updateStorefrontProductPrice = async (agentId, storefrontProductId, custom
 
   if (!storefrontProduct) throw new Error('Storefront product not found');
 
-  if (parseFloat(customPrice) < storefrontProduct.product.price) {
-    throw new Error(`Custom price cannot be less than base price (GHS ${storefrontProduct.product.price})`);
+  const basePrice = effectivePriceOf(storefrontProduct.product);
+  if (parseFloat(customPrice) < basePrice) {
+    throw new Error(`Custom price cannot be less than base price (GHS ${basePrice})`);
   }
 
   return await prisma.storefrontProduct.update({
@@ -263,7 +305,10 @@ const initializeReferralPayment = async (slug, storefrontProductId, customerName
   if (storefrontProduct.product.stock <= 0) throw new Error('Product out of stock');
 
   const paymentRef = generateReferralRef();
-  const basePrice = storefrontProduct.product.price;
+  // Use the promo-aware effective price so the recorded basePrice, the
+  // agent's commission, and the company revenue all line up with what
+  // every other sale channel (shop, cart, external API) is charging.
+  const basePrice = effectivePriceOf(storefrontProduct.product);
   const agentPrice = storefrontProduct.customPrice;
   const commission = agentPrice - basePrice;
 
@@ -483,6 +528,9 @@ const verifyReferralPayment = async (reference) => {
 
 // Get agent's referral orders and commission summary
 const getAgentReferralSummary = async (agentId) => {
+  // Fire-and-forget: clean stale pending referrals so agents don't see dead orders
+  cleanupStalePendingReferrals().catch(() => {});
+
   const referralOrders = await prisma.referralOrder.findMany({
     where: { agentId: parseInt(agentId) },
     include: {
@@ -514,6 +562,9 @@ const getAgentReferralSummary = async (agentId) => {
 
 // Get all referral orders (for admin)
 const getAllReferralOrders = async (filters = {}) => {
+  // Fire-and-forget: clean stale pending referrals before returning admin view
+  cleanupStalePendingReferrals().catch(() => {});
+
   const where = {};
   
   if (filters.agentId) where.agentId = parseInt(filters.agentId);
@@ -714,6 +765,30 @@ const getWeeklyCommissionSummary = async () => {
   };
 };
 
+// ==================== STALE REFERRAL ORDER CLEANUP ====================
+// Delete referral orders stuck in 'Pending' payment status for more than 24 hours.
+// These represent customers who initiated payment but never completed on Paystack.
+// Never touches Paid/Failed orders or any that were already linked to a real Order.
+const cleanupStalePendingReferrals = async () => {
+  try {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const result = await prisma.referralOrder.deleteMany({
+      where: {
+        paymentStatus: 'Pending',
+        orderId: null,
+        createdAt: { lt: cutoff }
+      }
+    });
+    if (result.count > 0) {
+      console.log(`[Referral Cleanup] Deleted ${result.count} stale pending referral order(s) older than 24h`);
+    }
+    return result.count;
+  } catch (error) {
+    console.error('[Referral Cleanup] Error:', error.message);
+    return 0;
+  }
+};
+
 module.exports = {
   // Agent storefront management
   getOrCreateStorefrontSlug,
@@ -737,5 +812,8 @@ module.exports = {
   // Admin functions
   getAllReferralOrders,
   markCommissionsPaid,
-  getWeeklyCommissionSummary
+  getWeeklyCommissionSummary,
+
+  // Maintenance
+  cleanupStalePendingReferrals
 };

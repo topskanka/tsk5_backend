@@ -352,24 +352,45 @@ const deleteTopup = async (topupId) => {
 // Verify top-up using Transaction ID (SMS verification)
 const verifyTransactionIdTopup = async (userId, referenceId, retries = 3) => {
   try {
-    // Find SMS message with this reference
-    const smsMessage = await smsService.findSmsByReference(referenceId);
+    // Normalize: trim whitespace and remove non-alphanumeric chars
+    const cleanRef = String(referenceId).trim().replace(/[^a-zA-Z0-9]/g, '');
 
+    // Step 1: Find SMS message regardless of processed status
+    const smsMessage = await smsService.findSmsByReferenceAny
+      ? await smsService.findSmsByReferenceAny(cleanRef)
+      : await smsService.findSmsByReference(cleanRef);
+
+    // Step 2: If not found at all → invalid ID
     if (!smsMessage) {
-      throw new Error("Invalid or already used transaction ID");
+      throw new Error("Invalid transaction ID. Please check the transaction ID and try again.");
+    }
+
+    // Step 3: If found but already processed → already used
+    if (smsMessage.isProcessed) {
+      const processedDate = smsMessage.updatedAt || smsMessage.createdAt;
+      const formattedDate = processedDate ? new Date(processedDate).toLocaleString('en-GH', { dateStyle: 'medium', timeStyle: 'short' }) : 'unknown date';
+      const amt = smsMessage.amount ? `GHS ${smsMessage.amount}` : '';
+      throw new Error(`This transaction ID has already been used. It was credited${amt ? ` (${amt})` : ''} on ${formattedDate}.`);
     }
 
     if (!smsMessage.amount) {
       throw new Error("Amount not found in SMS. Please contact support.");
     }
 
-    // Check if reference already exists in TopUp table
+    // Step 4: Check if reference already exists in TopUp table
     const existingTopUp = await prisma.topUp.findFirst({
-      where: { referenceId }
+      where: {
+        OR: [
+          { referenceId: cleanRef },
+          ...(smsMessage.reference && smsMessage.reference !== cleanRef ? [{ referenceId: smsMessage.reference }] : [])
+        ]
+      }
     });
 
     if (existingTopUp) {
-      throw new Error(`Transaction ID ${referenceId} has already been used.`);
+      const creditDate = existingTopUp.createdAt ? new Date(existingTopUp.createdAt).toLocaleString('en-GH', { dateStyle: 'medium', timeStyle: 'short' }) : 'unknown date';
+      const amt = existingTopUp.amount ? `GHS ${existingTopUp.amount}` : '';
+      throw new Error(`This transaction ID has already been used. It was credited${amt ? ` (${amt})` : ''} on ${creditDate}.`);
     }
 
     // Check if user exists

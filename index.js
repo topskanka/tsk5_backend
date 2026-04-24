@@ -211,3 +211,13 @@ const reconcileOrphanedPayments = async () => {
 
 setInterval(reconcileOrphanedPayments, 5 * 60 * 1000);
 setTimeout(reconcileOrphanedPayments, 30 * 1000);
+
+// Auto-delete stale pending referral orders (>24h) — run hourly
+const storefrontService = require('./services/storefrontService');
+setInterval(() => {
+  storefrontService.cleanupStalePendingReferrals().catch(() => {});
+}, 60 * 60 * 1000);
+// Initial run after 90 seconds
+setTimeout(() => {
+  storefrontService.cleanupStalePendingReferrals().catch(() => {});
+}, 90 * 1000);

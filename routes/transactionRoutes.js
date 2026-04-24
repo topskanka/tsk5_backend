@@ -7,7 +7,8 @@ const {
   getAuditLog, 
   getTransactionStats,
   getAdminBalanceSheetData,
-  searchTransactions
+  searchTransactions,
+  getAdminOverview
 } = require('../controllers/transactionController');
 const authMiddleware = require('../middleware/authMiddleware');
 const adminMiddleware = require('../middleware/adminMiddleware');
@@ -54,6 +55,15 @@ router.get('/admin-balance-sheet',
   authMiddleware, 
   adminMiddleware, 
   getAdminBalanceSheetData
+);
+
+// Admin overview: revenue/expenses/GB/sales-by-agent/shop totals aggregated
+// directly from the DB using orderItem.productPrice snapshots so the admin
+// dashboard modals never show stale or sampled figures.
+router.get('/admin-overview',
+  authMiddleware,
+  adminMiddleware,
+  getAdminOverview
 );
 
 // Route to search transactions across entire database

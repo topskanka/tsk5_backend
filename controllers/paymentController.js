@@ -5,6 +5,9 @@ const prisma = require('../config/db');
 
 // Atomic order creation - prevents duplicate orders from webhook + verify race condition
 const createOrderIfNotExists = async (externalRef, productId, mobileNumber) => {
+  // Get or create the shop user outside the transaction to avoid unnecessary locking
+  const shopUser = await shopService.getOrCreateShopUser();
+
   return await prisma.$transaction(async (tx) => {
     // Re-check inside transaction to prevent race condition
     const transaction = await tx.paymentTransaction.findUnique({
@@ -22,9 +25,33 @@ const createOrderIfNotExists = async (externalRef, productId, mobileNumber) => {
       });
       return { created: false, alreadyExists: true, orderId: transaction.orderId, order: existingOrder };
     }
+
+    // Get the product
+    const product = await tx.product.findUnique({ where: { id: productId } });
+    if (!product) {
+      return { created: false, error: 'Product not found' };
+    }
     
-    // Create the order
-    const order = await shopService.createShopOrder(productId, mobileNumber, 'Shop Customer');
+    // Create the order within the same transaction
+    const order = await tx.order.create({
+      data: {
+        userId: shopUser.id,
+        mobileNumber: mobileNumber,
+        status: "Pending",
+        items: {
+          create: [{
+            productId: productId,
+            quantity: 1,
+            mobileNumber: mobileNumber,
+            status: "Pending",
+            productName: product.name,
+            productPrice: (product.usePromoPrice && product.promoPrice != null) ? product.promoPrice : product.price,
+            productDescription: product.description
+          }]
+        }
+      },
+      include: { items: true }
+    });
     
     // Link transaction to order atomically
     await tx.paymentTransaction.update({

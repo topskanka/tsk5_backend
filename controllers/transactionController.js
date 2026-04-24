@@ -1,5 +1,21 @@
-const { getUserTransactions, getAllTransactions, getTransactionStatistics } = require('../services/transactionService');
+const { getUserTransactions, getAllTransactions, getTransactionStatistics, getAdminOverviewStats } = require('../services/transactionService');
 const prisma = require('../config/db');
+
+// Admin Overview: DB-aggregated revenue/expenses/GB/sales-by-agent/shop totals
+// so the admin dashboard never depends on a 200-row sample.
+const getAdminOverview = async (req, res) => {
+  try {
+    const { startDate, endDate, search, network } = req.query;
+    const stats = await getAdminOverviewStats(startDate, endDate, search, network);
+    res.status(200).json({ success: true, data: stats });
+  } catch (error) {
+    console.error("Error in getAdminOverview:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to retrieve admin overview"
+    });
+  }
+};
 
 // Get transactions for a specific user (accessible by user and admin)
 const getUserTransactionHistory = async (req, res) => {
@@ -25,25 +41,27 @@ const getUserTransactionHistory = async (req, res) => {
 // Get all transactions (admin only)
 const getAllTransactionHistory = async (req, res) => {
   try {
-    const { 
-      startDate, 
-      endDate, 
-      type, 
-      page = 1, 
-      limit = 100, 
-      search, 
-      amountFilter 
+    const {
+      startDate,
+      endDate,
+      type,
+      page = 1,
+      limit = 100,
+      search,
+      amountFilter,
+      network
     } = req.query;
     
     const result = await getAllTransactions(
-      startDate, 
-      endDate, 
-      type, 
+      startDate,
+      endDate,
+      type,
       null, // userId
-      parseInt(page), 
-      parseInt(limit), 
-      search, 
-      amountFilter
+      parseInt(page),
+      parseInt(limit),
+      search,
+      amountFilter,
+      network
     );
     
     res.status(200).json({
@@ -164,21 +182,23 @@ const getAuditLog = async (req, res) => {
 // Get transaction statistics (admin only)
 const getTransactionStats = async (req, res) => {
   try {
-    const { 
-      startDate, 
-      endDate, 
-      type, 
-      search, 
-      amountFilter 
+    const {
+      startDate,
+      endDate,
+      type,
+      search,
+      amountFilter,
+      network
     } = req.query;
     
     const stats = await getTransactionStatistics(
-      startDate, 
-      endDate, 
-      type, 
+      startDate,
+      endDate,
+      type,
       null, // userId
-      search, 
-      amountFilter
+      search,
+      amountFilter,
+      network
     );
     
     res.status(200).json({
@@ -431,5 +451,6 @@ module.exports = {
   getAuditLog,
   getTransactionStats,
   getAdminBalanceSheetData,
-  searchTransactions
+  searchTransactions,
+  getAdminOverview
 };
